@@ -1,0 +1,245 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import backtrader as bt
+#----------------------------------------------------------------------------------------------------------------------------
+def calculate_trade_durations(signals_with_risk_management):
+    # Calculate the duration between entry and exit timestamps for each trade
+    signals_with_risk_management['Trade_Duration'] = (signals_with_risk_management.index.to_series().diff().dt.total_seconds() / (3600 * 24)).fillna(0)
+ 
+    # Return the DataFrame with trade durations
+    return max(signals_with_risk_management['Trade_Duration'])
+#----------------------------------------------------------------------------------------------------------------------------
+# Function to implement the trend-following strategy with risk management
+def implement_trend_following_strategy_with_risk(data, short_window, long_window, atr_window, risk_per_trade, stop_loss_multiplier, max_drawdown_limit):
+    # Create a DataFrame to store signals
+    signals = pd.DataFrame(index=data.index)
+    signals['signal'] = 0.0
+
+    # Create short simple moving average
+    signals['short_mavg'] = data['close'].rolling(window=short_window, min_periods=1, center=False).mean()
+
+    # Create long simple moving average
+    signals['long_mavg'] = data['close'].rolling(window=long_window, min_periods=1, center=False).mean()
+
+    # Create signals
+    signals['signal'][short_window:] = np.where(signals['short_mavg'][short_window:] > signals['long_mavg'][short_window:], 1.0, 0.0)
+
+    # Generate trading orders
+    signals['positions'] = signals['signal'].diff()
+
+    # Calculate Average True Range (ATR) for volatility-based position sizing
+    signals['ATR'] = data['close'].diff().abs().rolling(window=atr_window).mean()
+
+    # Implement risk management with fixed percentage stop-loss
+    capital = 100000  # Initial capital (replace with your actual initial capital)
+    signals['Risk_Per_Trade'] = capital * risk_per_trade
+    signals['Stop_Loss'] = data['close'] - (signals['positions'].shift(1) * signals['Risk_Per_Trade'] * signals['ATR'] * stop_loss_multiplier)
+
+    # Adjust stop-loss levels to respect the maximum drawdown limit
+    max_drawdown = max_drawdown_limit * capital
+    signals['Stop_Loss'] = np.maximum(signals['Stop_Loss'], data['close'] - max_drawdown)
+
+    # Calculate position sizes based on risk and adjusted stop-loss
+    signals['Position_Size'] = capital * risk_per_trade / (signals['ATR'] * stop_loss_multiplier)
+    signals['Position_Size'] = signals['Position_Size'].fillna(0)
+
+    # Assuming 'Exit Price' is one hour after the entry
+    signals['Exit Price'] = data['close'].shift(-1)
+    # Assuming 'Entry Price' is the closing price at the time of entry
+    signals['Entry Price'] = data['close'][signals['positions'] == 1.0]
+
+    return signals
+#-----------------------------------------------------------------------------------------------------------------------------
+# Function to visualize the strategy signals with risk management
+def plot_signals(data, signals, title):
+    fig, ax1 = plt.subplots(figsize=(10, 5))
+
+    # Plotting close price
+    ax1.plot(data['close'], label='Price', linewidth=2, color='black')
+
+    # Plotting short and long moving averages
+    ax1.plot(data.index, signals['short_mavg'], label=f'Short {short_window} days MA', linestyle='--', alpha=0.7)
+    ax1.plot(data.index, signals['long_mavg'], label=f'Long {long_window} days MA', linestyle='--', alpha=0.7)
+
+    # Plotting buy signals
+    ax1.plot(signals.loc[signals.positions == 1.0].index,
+             signals.short_mavg[signals.positions == 1.0],
+             '^', markersize=10, color='g', label='Buy Signal')
+
+    # Plotting sell signals
+    ax1.plot(signals.loc[signals.positions == -1.0].index,
+             signals.short_mavg[signals.positions == -1.0],
+             'v', markersize=10, color='r', label='Sell Signal')
+
+    ax1.set_xlabel('Date')
+    ax1.set_ylabel('Close Price', color='black')
+    ax1.tick_params('y', colors='black')
+
+    # Creating a secondary y-axis for Position Size and Stop Loss
+    ax2 = ax1.twinx()
+    ax2.plot(signals.index, signals['Position_Size'], label='Position Size', linestyle='-', color='blue', alpha=0.7)
+    ax2.plot(signals.index, signals['Stop_Loss'], label='Stop Loss', linestyle='--', color='purple', alpha=0.7)
+
+    ax2.set_ylabel('Position Size / Stop Loss', color='black')
+    ax2.tick_params('y', colors='black')
+
+    fig.suptitle(title)
+    fig.legend(loc='upper left', bbox_to_anchor=(0.1, 0.9))  # Adjust the legend position as needed
+    plt.show()
+#-----------------------------------------------------------------------------------------------------------------------------
+# Function to calculate performance metrics
+def calculate_performance_metrics(signals_with_risk_management):
+    # Calculate Profit and Loss
+    signals_with_risk_management['Profit'] = signals_with_risk_management['Exit Price'] - signals_with_risk_management['Entry Price']
+
+    # Calculate Drawdown
+    signals_with_risk_management['Drawdown'] = (signals_with_risk_management['Exit Price'] - signals_with_risk_management['Stop_Loss']).clip(lower=0)
+
+    # Calculate peak value for Max Drawdown percentage
+    peak_value = signals_with_risk_management['Entry Price'].max()
+
+    # Calculate additional performance metrics
+    metrics = {
+        'Gross Profit': signals_with_risk_management.loc[signals_with_risk_management['Profit'] > 0, 'Profit'].sum(),
+        'Net Profit': signals_with_risk_management['Profit'].sum(),
+        'Total Closed Trades': signals_with_risk_management['signal'].sum(),
+        'Win Rate': (signals_with_risk_management['Profit'] > 0).mean() * 100,
+        'Max Drawdown': signals_with_risk_management['Drawdown'].max(),
+        'Max Drawdown (%)': signals_with_risk_management['Drawdown'].max() / peak_value * 100,
+        'Gross Loss': signals_with_risk_management.loc[signals_with_risk_management['Profit'] < 0, 'Profit'].sum(),
+        'Average Winning Trade': signals_with_risk_management.loc[signals_with_risk_management['Profit'] > 0, 'Profit'].mean(),
+        'Average Losing Trade': signals_with_risk_management.loc[signals_with_risk_management['Profit'] < 0, 'Profit'].mean(),
+        'Buy and Hold Return of BTC': (data['close'].iloc[-1] - data['close'].iloc[0]) / data['close'].iloc[0] * 100,
+        'Largest Losing Trade': signals_with_risk_management['Profit'].min(),
+        'Largest Winning Trade': signals_with_risk_management['Profit'].max(),
+        'Sharpe Ratio': calculate_sharpe_ratio(signals_with_risk_management),
+        'Sortino Ratio': calculate_sortino_ratio(signals_with_risk_management),
+        'Average Holding Duration per Trade': calculate_average_holding_duration(signals_with_risk_management),
+        'Max Dip in Running Trade': signals_with_risk_management['Drawdown'].max(),
+        'Average Dip in Running Trade': signals_with_risk_management['Drawdown'].mean()
+    }
+
+    return metrics
+# Function to calculate Sharpe Ratio
+def calculate_sharpe_ratio(signals_with_risk_management):
+    daily_returns = signals_with_risk_management['Profit'] / signals_with_risk_management['Entry Price']
+    sharpe_ratio = (daily_returns.mean() / daily_returns.std()) * np.sqrt(365)  # Assuming 365 trading days in a year
+    return sharpe_ratio
+
+# Function to calculate Sortino Ratio
+def calculate_sortino_ratio(signals_with_risk_management):
+    downside_returns = signals_with_risk_management.loc[signals_with_risk_management['Profit'] < 0, 'Profit']
+    sortino_ratio = (signals_with_risk_management['Profit'].mean() / downside_returns.std()) * np.sqrt(365)  # Assuming 365 trading days in a year
+    return sortino_ratio
+
+# Function to calculate Average Holding Duration per Trade
+def calculate_average_holding_duration(signals_with_risk_management):
+    holding_durations = (signals_with_risk_management.index.to_series().diff().dt.total_seconds() / 3600).mean()
+    return holding_durations
+#-----------------------------------------------------------------------------------------------------------------------
+# Backtrader Strategy for the same logic
+class TrendFollowingStrategy(bt.Strategy):
+    params = (
+        ("short_window", 20),
+        ("long_window", 200),
+        ("atr_window", 14),
+        ("risk_per_trade", 0.04),
+        ("stop_loss_multiplier", 1.5),
+        ("max_drawdown_limit", 0.015),  # 7%
+    )
+
+    def __init__(self):
+        self.short_ma = bt.indicators.SimpleMovingAverage(self.data.close, period=self.params.short_window)
+        self.long_ma = bt.indicators.SimpleMovingAverage(self.data.close, period=self.params.long_window)
+        self.atr = bt.indicators.AverageTrueRange(self.data, period=self.params.atr_window)
+
+    def next(self):
+        if self.short_ma > self.long_ma:
+            self.buy()
+        elif self.short_ma < self.long_ma:
+            self.sell()
+
+# Backtrader function to run the backtest
+
+def run_backtest(data, strategy):
+    cerebro = bt.Cerebro()
+
+    # Map column names if they are different
+    data.rename(columns={'open': 'open',
+                         'high': 'high',
+                         'low': 'low',
+                         'close': 'close',
+                         'volume': 'volume'},
+                inplace=True)
+
+    # Add the data
+    data_feed = bt.feeds.PandasData(dataname=data)
+    cerebro.adddata(data_feed)
+
+    # Add the strategy
+    cerebro.addstrategy(strategy)
+
+    # Set the initial cash amount for the backtest
+    cerebro.broker.set_cash(100000)
+
+    # Set the commission for buying and selling (you can adjust this based on your exchange)
+    cerebro.broker.setcommission(commission=0.001)
+
+    # Print the starting cash amount
+    print(f"Starting Portfolio Value: {cerebro.broker.getvalue():.2f} USDT")
+
+    # Run the backtest
+    cerebro.run()
+
+    # Print the final cash amount
+    print(f"Ending Portfolio Value: {abs(cerebro.broker.getvalue()):.2f} USDT")
+
+    # Plot the results
+    cerebro.plot(style="candlestick")
+#-------------------------------------------------------------------------------------------------------------------------------
+# Load data from CSV file
+data = pd.read_csv('btc_1h.csv', parse_dates=True)
+# Set the frequency of the datetime index
+data['datetime'] = pd.to_datetime(data['datetime'])
+data.set_index('datetime', inplace=True)
+# Set risk management parameters
+short_window = 20
+long_window = 200
+atr_window = 14
+risk_per_trade = 0.04
+stop_loss_multiplier = 1.5
+max_drawdown_limit = 0.015  # 7%
+#-------------------------------------------------------------------------------------------------------------------------------
+# Implement the trend-following strategy with risk management
+signals_with_risk_management = implement_trend_following_strategy_with_risk(data, short_window, long_window, atr_window, risk_per_trade, stop_loss_multiplier, max_drawdown_limit)
+# Visualize the strategy signals with risk management
+plot_signals(data, signals_with_risk_management, 'Trend-Following Strategy with Risk Management')
+#------------------------------------------------------------------------------------------------------------------------------
+# Calculate and print the performance metrics
+performance_metrics = calculate_performance_metrics(signals_with_risk_management)
+for metric, value in performance_metrics.items():
+    print(f"{metric}: {value}")
+    if metric=='Average Winning Trade':
+        awt=value
+    if metric=='Average Losing Trade':
+        alt=value   
+print(f"\nRisk-Reward Ratio:{abs(awt/alt)}\n")
+#------------------------------------------------------------------------------------------------------------------------------
+# Calculate the buy and hold return of BTC
+buy_and_hold_return = performance_metrics['Buy and Hold Return of BTC']
+# Calculate the net profit generated by the ML model
+net_profit_ml_model = performance_metrics['Net Profit']
+# Calculate the percentage increase
+percentage_increase = (net_profit_ml_model / abs(buy_and_hold_return)) * 100
+#-----------------------------------------------------------------------------------------------------------------------------
+# Print the results
+print(f"\nNet Profit of ML Model: {net_profit_ml_model:.2f}")
+print(f"Buy and Hold Return of BTC: {buy_and_hold_return:.2f}")
+print(f"Percentage Increase: {percentage_increase:.2f}%\n")
+duration= calculate_trade_durations(signals_with_risk_management)
+print(f"Max Duration Time:{duration}days\n")
+# Run backtest using the Backtrader framework
+
+
+#--------------------------------------------------------------------------------------------------------------------------
