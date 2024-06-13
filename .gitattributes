@@ -1,2 +1,8 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Specify the primary language of the project
+*.py linguist-language=Python
+
+# Ensure the CSV file is not detected as a programming language
+*.csv linguist-detectable=false
+
+# Exclude Jupyter Notebook from being counted as a language
+*.ipynb linguist-detectable=false
