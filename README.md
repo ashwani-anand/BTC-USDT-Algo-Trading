@@ -1,4 +1,4 @@
-# BTC-USDT Algo Trading
+# QuantTrader
 
 This project implements a trend-following trading strategy with risk management techniques using Python and Backtrader. The strategy aims to capture trends in the BTC/USDT market while managing risk through position sizing and stop-loss mechanisms.
 
